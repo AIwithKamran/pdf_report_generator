@@ -2,14 +2,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import os
 import sqlite3
+from typing import Optional
 import uuid
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 
 DATABASE_FILE = "report.db"
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+
+# --- Request Body Schema ---
+class ReportRequest(BaseModel):
+    force: Optional[bool] = False
 
 
 # --- Database Lifespan (Startup) ---
@@ -59,7 +66,7 @@ def fetch_report_data():
         """)
         top_products = cursor.fetchall()
 
-        # All orders (log table)
+        # All orders
         cursor.execute("""
             SELECT id, customer, product, amount, created_at
             FROM orders
@@ -102,8 +109,6 @@ def build_html_template(data):
         table {{ width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; }}
         th, td {{ padding: 8px 10px; border-bottom: 1px solid #eee; text-align: left; }}
         th {{ background: #f7f7f7; font-weight: 600; }}
-        
-        /* Print layout rules */
         thead {{ display: table-header-group; }}
         tr {{ break-inside: avoid; page-break-inside: avoid; }}
     </style>
@@ -159,8 +164,35 @@ def get_report_data():
     }
 
 
-@app.post("/reports", status_code=status.HTTP_201_CREATED)
-def create_report():
+@app.post("/reports")
+def create_report(payload: Optional[ReportRequest] = None, response: Response = None):
+    force = payload.force if payload else False
+    today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # 1. Idempotency check: Look for a report generated today
+    if not force:
+        with sqlite3.connect(DATABASE_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, path FROM reports 
+                WHERE created_at LIKE ? 
+                ORDER BY id DESC LIMIT 1
+                """,
+                (f"{today_prefix}%",),
+            )
+            existing = cursor.fetchone()
+
+        # If already exists and file is on disk, return 200 OK
+        if existing and os.path.exists(existing[1]):
+            response.status_code = status.HTTP_200_OK
+            return {
+                "id": existing[0],
+                "file": f"/reports/{existing[0]}/file",
+                "cached": True,
+            }
+
+    # 2. Pipeline: Generate HTML and render via Playwright
     data = fetch_report_data()
     html_content = build_html_template(data)
 
@@ -168,7 +200,6 @@ def create_report():
     pdf_filename = f"report_{file_id}.pdf"
     pdf_path = os.path.join(REPORTS_DIR, pdf_filename)
 
-    # Render PDF through Playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
@@ -176,20 +207,21 @@ def create_report():
         page.pdf(path=pdf_path, format="A4", print_background=True)
         browser.close()
 
-    # Record in SQLite
+    # 3. Store record in DB
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DATABASE_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO reports (path, created_at) VALUES (?, ?)",
-            (pdf_path, now)
+            (pdf_path, now),
         )
         report_id = cursor.lastrowid
         conn.commit()
 
+    response.status_code = status.HTTP_201_CREATED
     return {
         "id": report_id,
-        "file": f"/reports/{report_id}/file"
+        "file": f"/reports/{report_id}/file",
     }
 
 
@@ -207,7 +239,7 @@ def get_report(report_id: int):
         "id": row[0],
         "path": row[1],
         "created_at": row[2],
-        "file": f"/reports/{row[0]}/file"
+        "file": f"/reports/{row[0]}/file",
     }
 
 
@@ -224,5 +256,5 @@ def get_report_file(report_id: int):
     return FileResponse(
         path=row[0],
         media_type="application/pdf",
-        filename=os.path.basename(row[0])
+        filename=os.path.basename(row[0]),
     )
