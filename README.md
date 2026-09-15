@@ -1,27 +1,3 @@
-+-----------------------------+
-                  |       Client / Frontend     |
-                  +-----------------------------+
-                                 |         ^
-           POST /reports (JSON)  |         |  200 / 201 + Link
-                                 v         |
-                  +-----------------------------+
-                  |         FastAPI App         |
-                  +-----------------------------+
-                               /           \
-              1. Idempotency  /             \  3. Record Metadata
-                 & Aggregate /               \    & Serve File
-                            v                 v
-                 [( SQLite: report.db )]   [( reports/*.pdf )]
-                            |
-                            | 2. HTML + Print CSS
-                            v
-                  +-------------------+
-                  | Headless Chromium |
-                  |   (Playwright)    |
-                  +-------------------+
-
----
-
 ## Architectural & Engineering Highlights
 
 ### 1. Print CSS Strategy (Clean Page Breaks)
